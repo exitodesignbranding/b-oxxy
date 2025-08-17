@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>B-OXY • Extrusão SVG (sem servidor)</title>
+  <style>
+    html, body { height: 100%; margin: 0; background: #111; }
+    #app { position: fixed; inset: 0; }
+    .hud {
+      position: fixed; left: 12px; bottom: 12px; color: #ccc;
+      font: 12px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: rgba(0,0,0,.35); padding: 10px 12px; border-radius: 10px; backdrop-filter: blur(4px);
+    }
+    .hud code { color: #fff; }
+    .btn {
+      display:inline-block; margin:8px 8px 0 0; padding:6px 10px; border-radius:8px; border:1px solid #444; color:#ddd;
+      text-decoration:none; background:#1b1b1b; cursor:pointer;
+    }
+    #file { display:none; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div class="hud">
+    <div><strong>Sem servidor:</strong> clique em <em>Carregar SVG</em> e selecione seu <code>.svg</code>. (Evita erro de CORS.)</div>
+    <div>Se preferir carregar automaticamente <code>b-oxy.svg</code>, abra este arquivo via <em>localhost</em> (ex.: <code>python -m http.server</code>).</div>
+    <div style="margin-top:6px">
+      <label class="btn" for="file">Carregar SVG</label><input id="file" type="file" accept=".svg,image/svg+xml" />
+      <a class="btn" href="#" id="toggleEnv">Ambiente</a>
+      <a class="btn" href="#" id="toggleBars">Clones</a>
+      <a class="btn" href="#" id="rotate">Auto-rotar (R)</a>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.161.0/build/three.module.js';
+    import { OrbitControls } from 'https://unpkg.com/three@0.161.0/examples/jsm/controls/OrbitControls.js';
+    import { SVGLoader } from 'https://unpkg.com/three@0.161.0/examples/jsm/loaders/SVGLoader.js';
+    import { RoomEnvironment } from 'https://unpkg.com/three@0.161.0/examples/jsm/environments/RoomEnvironment.js';
+
+    const DEPTH = 8, BEVEL=true, BEVEL_SIZE=0.9, BEVEL_THICKNESS=0.8, BEVEL_SEGMENTS=2;
+    const METALNESS=0.9, ROUGHNESS=0.28, USE_ORTHO=true, BARS_COUNT=12;
+
+    const app = document.getElementById('app');
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.1;
+    app.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene(); scene.background = null;
+
+    let camera;
+    if (USE_ORTHO) {
+      const frustumSize = 1200, aspect = innerWidth/innerHeight;
+      camera = new THREE.OrthographicCamera((-frustumSize*aspect)/2, (frustumSize*aspect)/2, frustumSize/2, -frustumSize/2, -5000, 5000);
+      camera.position.set(0,0,1000);
+    } else {
+      camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 5000);
+      camera.position.set(0, 200, 800);
+    }
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const envRT = pmrem.fromScene(new RoomEnvironment(), 0.1);
+    scene.environment = envRT.texture;
+
+    scene.add(new THREE.AmbientLight(0xffffff, .35));
+    const key = new THREE.DirectionalLight(0xffffff, 1.2); key.position.set(300,350,500); scene.add(key);
+    const rim = new THREE.DirectionalLight(0x99ccff, .6); rim.position.set(-400,-200,350); scene.add(rim);
+
+    const baseMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: METALNESS, roughness: ROUGHNESS });
+
+    const root = new THREE.Group(); scene.add(root);
+    const barsGroup = new THREE.Group(); barsGroup.visible=false; scene.add(barsGroup);
+
+    let autoRotate=false;
+    document.getElementById('rotate').addEventListener('click', e=>{ e.preventDefault(); autoRotate=!autoRotate; });
+    document.addEventListener('keydown', e=>{ if(e.key.toLowerCase()==='r') autoRotate=!autoRotate; });
+
+    document.getElementById('toggleEnv').addEventListener('click', e=>{
+      e.preventDefault();
+      scene.environment = scene.environment ? null : envRT.texture;
+      renderer.toneMappingExposure = scene.environment ? 1.1 : 0.95;
+    });
+    document.getElementById('toggleBars').addEventListener('click', e=>{
+      e.preventDefault(); barsGroup.visible = !barsGroup.visible;
+    });
+
+    // Carregar SVG via input (FileReader) -> evita CORS
+    const fileInput = document.getElementById('file');
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const svgText = reader.result;
+        loadFromString(svgText);
+      };
+      reader.readAsText(file);
+    });
+
+    // Também permite tentativa automática de 'b-oxy.svg' se abrirem via localhost
+    tryFetchDefault();
+
+    async function tryFetchDefault() {
+      try {
+        const res = await fetch('b-oxy.svg', { mode: 'same-origin' });
+        if (res.ok) {
+          const text = await res.text();
+          loadFromString(text);
+        }
+      } catch (e) {
+        // silencioso quando for file:// (CORS)
+      }
+    }
+
+    function loadFromString(svgText){
+      // limpa cena anterior
+      for (let i=root.children.length-1; i>=0; i--) root.remove(root.children[i]);
+      // parse
+      const svgDoc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
+      const loader = new SVGLoader();
+      const data = loader.parse(svgDoc.documentElement);
+      const group = new THREE.Group();
+      for (const path of data.paths) {
+        const shapes = SVGLoader.createShapes(path);
+        for (const shape of shapes) {
+          const geo = new THREE.ExtrudeGeometry(shape, {
+            depth: DEPTH, bevelEnabled: BEVEL, bevelSize: BEVEL_SIZE, bevelThickness: BEVEL_THICKNESS,
+            bevelSegments: BEVEL_SEGMENTS, curveSegments: 16, steps: 1
+          });
+          const mat = baseMaterial.clone();
+          const style = path.userData.style || {};
+          if (style.fill && style.fill!=='none') mat.color = new THREE.Color(style.fill);
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.scale.y = -1;
+          group.add(mesh);
+        }
+      }
+      // centraliza e escala
+      const box = new THREE.Box3().setFromObject(group);
+      const size = new THREE.Vector3(); const center = new THREE.Vector3();
+      box.getSize(size); box.getCenter(center);
+      group.position.x = -center.x; group.position.y = -center.y;
+      const targetW = 900; const s = targetW/size.x; group.scale.setScalar(s);
+      root.add(group);
+      if (camera.isOrthographicCamera) fitOrthoToObject(camera, group, controls);
+      createBarsAround(group);
+    }
+
+    function fitOrthoToObject(orthoCam, object, controls) {
+      const box = new THREE.Box3().setFromObject(object);
+      const size = new THREE.Vector3(); box.getSize(size);
+      const margin = 1.25; const maxDim = Math.max(size.x, size.y)*margin;
+      const aspect = innerWidth/innerHeight;
+      orthoCam.left=-maxDim*aspect/2; orthoCam.right=maxDim*aspect/2;
+      orthoCam.top=maxDim/2; orthoCam.bottom=-maxDim/2;
+      orthoCam.near=-5000; orthoCam.far=5000; orthoCam.updateProjectionMatrix();
+      controls.target.set(0,0,0); controls.update();
+    }
+
+    function createBarsAround(target) {
+      barsGroup.clear();
+      const bb = new THREE.Box3().setFromObject(target);
+      const size = new THREE.Vector3(); bb.getSize(size);
+      const radius = Math.max(size.x,size.y)*0.85;
+      for (let i=0;i<BARS_COUNT;i++){
+        const len = radius*(1.2+Math.random()*0.8);
+        const geo = new THREE.BoxGeometry(len,8,8);
+        const hue = Math.random()*360;
+        const col = new THREE.Color().setHSL(hue/360, .7, .5);
+        const mat = new THREE.MeshStandardMaterial({ color: col, metalness:.2, roughness:.35, transparent:true, opacity:.75 });
+        const bar = new THREE.Mesh(geo, mat);
+        bar.position.set(0,0,-DEPTH*.6 - Math.random()*60);
+        bar.rotation.z = (i/BARS_COUNT)*Math.PI*2 + Math.random()*0.2;
+        bar.userData.spin = (Math.random()*0.6+0.2) * (Math.random()<0.5?-1:1);
+        barsGroup.add(bar);
+      }
+    }
+
+    function animate(){
+      requestAnimationFrame(animate);
+      controls.update();
+      if (autoRotate) root.rotation.z += 0.0025;
+      for (const b of barsGroup.children) b.rotation.z += 0.0015*(b.userData.spin||1);
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    addEventListener('resize', ()=>{
+      renderer.setSize(innerWidth, innerHeight);
+      if (camera.isOrthographicCamera) fitOrthoToObject(camera, root, controls);
+      else { camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); }
+    });
+  </script>
+</body>
+</html>
